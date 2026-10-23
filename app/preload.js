@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld("client", {
   openPage: url => ipcRenderer.send("openPage", url),
   // the player's own theatre video file, which the game page may then load; "" when stopped.
   ownVideo: link => ipcRenderer.invoke("ownVideo", link),
+  // an address the theatre's browser would not load (main.js BROWSER_SITES)
+  onBrowserBlocked: listener => ipcRenderer.on("browserBlocked", (event, url) => listener(url)),
   // Discord rich presence (discord.js): {appId, state, start, url}, or null.
   presence: info => ipcRenderer.send("presence", info),
   onFullscreen: listener => ipcRenderer.on("fullscreen", (event, on) => listener(on)),

@@ -82,13 +82,28 @@ const API_PARTITION = "aj-api";
 const BROWSER_PARTITION = "aj-browser";
 let browserSession = null;
 const isBrowser = contents => browserSession !== null && contents.session === browserSession;
-const webAddress = text => {
+// the sites it may show, each with every host under it: pages, and all they
+// load, come from these alone, and only over https. this Electron's Chromium
+// (87, kept for Flash) has known holes that will never be mended, so the open
+// web stays in the player's own browser: a page anywhere else is not loaded
+// here, and the game page is told (browserBlocked), to offer to open it there.
+const BROWSER_SITES = ["duckduckgo.com", "wikipedia.org", "wikimedia.org"];
+const browserSite = text => {
   try {
     const url = new URL(String(text));
-    return url.protocol === "https:" || url.protocol === "http:";
+    return url.protocol === "https:" && BROWSER_SITES.some(site => url.hostname === site || url.hostname.endsWith(`.${site}`));
   }
   catch (err) {
     return false;
+  }
+};
+// none on Linux: the client runs there without Chromium's sandbox (Flash
+// cannot start with it, below), so a page that broke into the browser would
+// be on the player's computer.
+const BROWSER_SUPPORTED = process.platform !== "linux";
+const browserBlocked = url => {
+  if (win && /^https?:\/\//.test(String(url))) {
+    win.webContents.send("browserBlocked", String(url));
   }
 };
 
@@ -215,6 +230,9 @@ ipcMain.handle("info", () => ({
   // what the game is told it runs on; it only knows these two.
   os: process.platform === "darwin" ? "mac" : "win",
   flashPluginFound: fs.existsSync(FLASH_PLUGIN),
+  // the theatre's browser: whether this client shows it, and where it may go
+  theatreBrowser: BROWSER_SUPPORTED,
+  theatreBrowserSites: BROWSER_SITES,
 }));
 
 // resolves to the local port the game is to connect to (see relay.js), 0
@@ -518,12 +536,16 @@ app.on("web-contents-created", (event, contents) => {
     webPreferences.contextIsolation = true;
     // the theatre's browser: a web page like any, with nothing of ours.
     if (params.partition === BROWSER_PARTITION) {
+      if (!BROWSER_SUPPORTED) {
+        attachEvent.preventDefault();
+        return;
+      }
       delete webPreferences.preload;
       delete webPreferences.preloadURL;
       webPreferences.sandbox = true;
       webPreferences.plugins = false;
       webPreferences.webviewTag = false;
-      if (!webAddress(params.src)) {
+      if (!browserSite(params.src)) {
         params.src = "about:blank";
       }
       return;
@@ -540,8 +562,9 @@ app.on("web-contents-created", (event, contents) => {
   // server: a page that arrived any other way would inherit what these have.
   contents.on("will-navigate", (navigateEvent, url) => {
     if (isBrowser(contents)) {
-      if (!webAddress(url)) {
+      if (!browserSite(url)) {
         navigateEvent.preventDefault();
+        browserBlocked(url);
       }
       return;
     }
@@ -560,13 +583,23 @@ app.on("web-contents-created", (event, contents) => {
     windowEvent.preventDefault();
     // the theatre's browser opens a new window's page in itself
     if (isBrowser(contents)) {
-      if (webAddress(url)) {
+      if (browserSite(url)) {
         contents.loadURL(url);
+      }
+      else {
+        browserBlocked(url);
       }
       return;
     }
     if (/^https?:\/\//.test(url)) {
       shell.openExternal(url);
+    }
+  });
+  // a page of the theatre's browser that sends it on elsewhere stays put.
+  contents.on("will-redirect", (redirectEvent, url, isInPlace, isMainFrame) => {
+    if (isBrowser(contents) && isMainFrame && !browserSite(url)) {
+      redirectEvent.preventDefault();
+      browserBlocked(url);
     }
   });
   // keys are seen here even while the Flash plugin has the keyboard.
@@ -615,7 +648,13 @@ app.whenReady().then(() => {
     catch (err) {
       // not an address: refused.
     }
-    answer({cancel: !url || !["https:", "http:", "data:", "blob:", "about:"].includes(url.protocol)});
+    // its sites alone (BROWSER_SITES): a script, a picture or a frame from
+    // anywhere else is not loaded, nor a page that got past the checks above.
+    const allowed = url !== null && (["data:", "blob:", "about:"].includes(url.protocol) || browserSite(url.href));
+    if (!allowed && url && details.resourceType === "mainFrame") {
+      browserBlocked(url.href);
+    }
+    answer({cancel: !allowed});
   });
   session.fromPartition(CAPTCHA_PARTITION).webRequest.onBeforeRequest((details, answer) => {
     let url = null;

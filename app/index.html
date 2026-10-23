@@ -1137,6 +1137,20 @@
       const theatreBrowser = (() => {
         let view = null;
         let ready = false; // a webview answers nothing before its first dom-ready
+        // the last address it would not load (not one of info.theatreBrowserSites,
+        // main.js), for the game page to offer to open in the player's own
+        // browser; "" once a page is shown again.
+        let blocked = "";
+        const onSite = text => {
+          try {
+            const url = new URL(String(text));
+            return url.protocol === "https:" && ((info && info.theatreBrowserSites) || [])
+              .some(site => url.hostname === site || url.hostname.endsWith(`.${site}`));
+          }
+          catch (err) {
+            return false;
+          }
+        };
         const webAddress = text => {
           try {
             const url = new URL(String(text));
@@ -1155,9 +1169,14 @@
             catch (err) {
               // not attached yet
             }
-            webview.send("browserState", {url, back: view.canGoBack(), forward: view.canGoForward(), loading: view.isLoading()});
+            webview.send("browserState", {url, back: view.canGoBack(), forward: view.canGoForward(), loading: view.isLoading(),
+              blocked, sites: (info && info.theatreBrowserSites) || []});
           }
         };
+        window.client.onBrowserBlocked(url => {
+          blocked = String(url || "");
+          tell();
+        });
         const close = () => {
           if (view) {
             view.remove();
@@ -1166,6 +1185,19 @@
           }
         };
         const open = url => {
+          if (!onSite(url)) {
+            blocked = url;
+            if (!view) {
+              url = "about:blank";
+            }
+            else {
+              tell();
+              return;
+            }
+          }
+          else {
+            blocked = "";
+          }
           if (view && ready) {
             view.loadURL(url);
             return;
@@ -1186,6 +1218,13 @@
           for (const name of ["did-navigate", "did-navigate-in-page", "did-start-loading", "did-stop-loading", "did-fail-load"]) {
             view.addEventListener(name, tell);
           }
+          // a page of its sites shown: nothing waits to be opened elsewhere
+          view.addEventListener("did-navigate", event => {
+            if (onSite(event.url)) {
+              blocked = "";
+              tell();
+            }
+          });
           $("stage").append(view);
         };
         // where: {x, y, w, h} in the game page's pixels, `clip` its CSS
@@ -1216,6 +1255,7 @@
               open(url);
             }
             else if (message.action === "close") {
+              blocked = "";
               close();
             }
             else if (view && ready && message.action === "back" && view.canGoBack()) {
@@ -1249,7 +1289,8 @@
           setMuted(muted);
           webview.send("flashVarsReady", session.flashVars);
           // this client can show the theatre's browser; the server says whether it is offered
-          webview.send("browserSupported", true);
+          // (not on Linux, nor in a client without the sandbox: main.js)
+          webview.send("browserSupported", Boolean(info && info.theatreBrowser));
         }, {once: true});
         webview.addEventListener("did-fail-load", event => {
           if (event.isMainFrame) {
